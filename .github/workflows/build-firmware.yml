@@ -1,0 +1,61 @@
+name: Build MatriSense Firmware
+
+# Trigger the workflow on pushes or pull requests affecting firmware files
+on:
+  push:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/build-firmware.yml'
+    branches: [ main, develop ]
+  pull_request:
+    paths:
+      - 'firmware/**'
+    branches: [ main ]
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  build:
+    name: Compile PlatformIO Firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout repository source code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. Set up Python environment needed by PlatformIO
+      - name: Set up Python 3.x
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. Cache PlatformIO core and libraries to speed up subsequent CI runs
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: ${{ runner.os }}-pip-platformio-${{ hashFiles('**/platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-platformio-
+
+      # 4. Install PlatformIO Core
+      - name: Install PlatformIO Core
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade platformio
+
+      # 5. Build firmware using PlatformIO CLI
+      - name: Build Firmware Binary
+        run: |
+          cd firmware
+          pio run
+
+      # 6. Upload compiled firmware binary (.hex / .bin) as GitHub Artifact
+      - name: Upload Firmware Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrisense-nrf52840-firmware
+          path: firmware/.pio/build/**/firmware.*
+          retention-days: 14
