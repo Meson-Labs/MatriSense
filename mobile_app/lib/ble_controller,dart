@@ -1,0 +1,55 @@
+import 'dart:async';
+import 'dart:io';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:path_provider/path_provider.dart';
+
+class BleController {
+  BluetoothDevice? targetDevice;
+  StreamSubscription? _adapterStateSubscription;
+  List<String> logData = ["Timestamp,HeartRate,SpO2,TemperatureC,AccelX,AccelY,AccelZ"];
+
+  void startScanAndConnect() async {
+    FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
+    FlutterBluePlus.scanResults.listen((results) async {
+      for (ScanResult r in results) {
+        if (r.device.platformName == "MatriSense-Node") {
+          FlutterBluePlus.stopScan();
+          targetDevice = r.device;
+          await targetDevice!.connect();
+          _discoverAndSubscribe();
+          break;
+        }
+      }
+    });
+  }
+
+  void _discoverAndSubscribe() async {
+    List<BluetoothService> services = await targetDevice!.discoverServices();
+    for (var service in services) {
+      for (var characteristic in service.characteristics) {
+        if (characteristic.uuid.toString().contains("2a37")) {
+          await characteristic.setNotifyValue(true);
+          characteristic.value.listen((data) {
+            if (data.length >= 7) {
+              int hr = data[0];
+              int spo2 = data[1];
+              double temp = ((data[2] << 8) | data[3]) / 100.0;
+              double ax = data[4] / 10.0;
+              double ay = data[5] / 10.0;
+              double az = data[6] / 10.0;
+
+              String row = "${DateTime.now().iso8601String},$hr,$spo2,$temp,$ax,$ay,$az";
+              logData.add(row);
+            }
+          });
+        }
+      }
+    }
+  }
+
+  Future<File> exportCSV() async {
+    final directory = await getApplicationDocumentsDirectory();
+    final file = File('${directory.path}/matrisense_data_${DateTime.now().millisecondsSinceEpoch}.csv');
+    return await file.writeAsString(logData.join('\n'));
+  }
+}
