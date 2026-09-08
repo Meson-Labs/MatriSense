@@ -6,16 +6,34 @@ import 'package:path_provider/path_provider.dart';
 class BleController {
   BluetoothDevice? targetDevice;
   StreamSubscription? _adapterStateSubscription;
-  List<String> logData = ["Timestamp,HeartRate,SpO2,TemperatureC,AccelX,AccelY,AccelZ"];
+  StreamSubscription? _valueSubscription;
 
+  // StreamController to broadcast parsed vitals to the UI
+  final StreamController<Map<String, dynamic>> _vitalsStreamController =
+      StreamController<Map<String, dynamic>>.broadcast();
+
+  // Public getter for UI stream subscription
+  Stream<Map<String, dynamic>> get vitalsStream => _vitalsStreamController.stream;
+
+  // In-memory log buffer for CSV export
+  List<String> logData = [
+    "Timestamp,HeartRate,SpO2,TemperatureC,AccelX,AccelY,AccelZ,AlertStatus"
+  ];
+
+  /// Scan for BLE devices and automatically connect to MatriSense-Node
   void startScanAndConnect() async {
+    // Stop any existing scan or active subscriptions before starting anew
+    await FlutterBluePlus.stopScan();
+    _valueSubscription?.cancel();
+
     FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
+
     FlutterBluePlus.scanResults.listen((results) async {
       for (ScanResult r in results) {
         if (r.device.platformName == "MatriSense-Node") {
-          FlutterBluePlus.stopScan();
+          await FlutterBluePlus.stopScan();
           targetDevice = r.device;
-          await targetDevice!.connect();
+          await targetDevice!.connect(autoConnect: false);
           _discoverAndSubscribe();
           break;
         }
@@ -23,33 +41,74 @@ class BleController {
     });
   }
 
+  /// Discover GATT services and subscribe to the vitals characteristic
   void _discoverAndSubscribe() async {
+    if (targetDevice == null) return;
+
     List<BluetoothService> services = await targetDevice!.discoverServices();
     for (var service in services) {
-      for (var characteristic in service.characteristics) {
-        if (characteristic.uuid.toString().contains("2a37")) {
-          await characteristic.setNotifyValue(true);
-          characteristic.value.listen((data) {
-            if (data.length >= 7) {
-              int hr = data[0];
-              int spo2 = data[1];
-              double temp = ((data[2] << 8) | data[3]) / 100.0;
-              double ax = data[4] / 10.0;
-              double ay = data[5] / 10.0;
-              double az = data[6] / 10.0;
+      // Matching MatriSense custom GATT Service UUID (0x180D / matching string)
+      if (service.uuid.toString().toLowerCase().contains("180d")) {
+        for (var characteristic in service.characteristics) {
+          // Matching Vitals Characteristic UUID (0x2A37 / matching string)
+          if (characteristic.uuid.toString().toLowerCase().contains("2a37")) {
+            await characteristic.setNotifyValue(true);
+            
+            _valueSubscription = characteristic.value.listen((data) {
+              if (data.length >= 7) {
+                // Parse binary packet matching VitalsPacket C++ struct
+                int hr = data[0];
+                int spo2 = data[1];
+                
+                // Reconstruct 16-bit signed integer for temperature (°C * 100)
+                int tempRaw = (data[2] << 8) | data[3];
+                if (tempRaw > 32767) tempRaw -= 65536; // Handle signed negative values
+                double temp = tempRaw / 100.0;
 
-              String row = "${DateTime.now().iso8601String},$hr,$spo2,$temp,$ax,$ay,$az";
-              logData.add(row);
-            }
-          });
+                // Scale accelerometer values (m/s² * 10)
+                double ax = (data[4] > 127 ? data[4] - 256 : data[4]) / 10.0;
+                double ay = (data[5] > 127 ? data[5] - 256 : data[5]) / 10.0;
+                double az = (data[6] > 127 ? data[6] - 256 : data[6]) / 10.0;
+
+                int alertStatus = data.length >= 8 ? data[7] : 0;
+
+                String timestamp = DateTime.now().toIso8601String();
+
+                // Append to CSV log buffer
+                String csvRow = "$timestamp,$hr,$spo2,$temp,$ax,$ay,$az,$alertStatus";
+                logData.add(csvRow);
+
+                // Broadcast parsed payload to main.dart UI
+                _vitalsStreamController.add({
+                  'hr': hr,
+                  'spo2': spo2,
+                  'temp': temp,
+                  'ax': ax,
+                  'ay': ay,
+                  'az': az,
+                  'status': alertStatus,
+                });
+              }
+            });
+          }
         }
       }
     }
   }
 
+  /// Export telemetry buffer to a local CSV file
   Future<File> exportCSV() async {
     final directory = await getApplicationDocumentsDirectory();
-    final file = File('${directory.path}/matrisense_data_${DateTime.now().millisecondsSinceEpoch}.csv');
+    final fileName = 'matrisense_log_${DateTime.now().millisecondsSinceEpoch}.csv';
+    final file = File('${directory.path}/$fileName');
+    
     return await file.writeAsString(logData.join('\n'));
+  }
+
+  /// Dispose controller subscriptions
+  void dispose() {
+    _valueSubscription?.cancel();
+    _adapterStateSubscription?.cancel();
+    _vitalsStreamController.close();
   }
 }
