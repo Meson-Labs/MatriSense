@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'ble_controller.dart';
+import 'export_service.dart';
 
 void main() {
   runApp(const MatriSenseApp());
@@ -32,8 +33,9 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   final BleController _bleController = BleController();
+  StreamSubscription? _vitalsSubscription;
   bool _isConnected = false;
-  
+
   // Real-time Vitals State
   int _heartRate = 0;
   int _spO2 = 0;
@@ -44,7 +46,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
-    _bleController.vitalsStream.listen((vitals) {
+    _vitalsSubscription = _bleController.vitalsStream.listen((vitals) {
       setState(() {
         _heartRate = vitals['hr'];
         _spO2 = vitals['spo2'];
@@ -56,6 +58,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _isConnected = true;
       });
     });
+  }
+
+  @override
+  void dispose() {
+    _vitalsSubscription?.cancel();
+    _bleController.dispose();
+    super.dispose();
   }
 
   Color _getAlertColor() {
@@ -89,14 +98,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
         foregroundColor: Colors.white,
         actions: [
           IconButton(
-            icon: const Icon(Icons.share_arrival_time_outlined),
-            tooltip: 'Export CSV Data',
+            icon: const Icon(Icons.share_outlined),
+            tooltip: 'Share CSV Telemetry',
             onPressed: () async {
-              final file = await _bleController.exportCSV();
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Telemetry exported to: ${file.path}')),
-                );
+              try {
+                await ExportService.shareCSVLog(_bleController.logData);
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Export failed: ${e.toString()}'),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                }
               }
             },
           )
@@ -107,7 +122,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Status Header
+            // Status Banner
             Container(
               padding: const EdgeInsets.all(12.0),
               decoration: BoxDecoration(
@@ -126,14 +141,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       fontSize: 16,
                     ),
                   ),
-                  Icon(_isConnected ? Icons.bluetooth_connected : Icons.bluetooth_searching, 
-                       color: _getAlertColor()),
+                  Icon(
+                    _isConnected
+                        ? Icons.bluetooth_connected
+                        : Icons.bluetooth_searching,
+                    color: _getAlertColor(),
+                  ),
                 ],
               ),
             ),
             const SizedBox(height: 20),
 
-            // Scan / Connect Action Button
+            // Bluetooth Scan / Reconnect Action Button
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.all(14.0),
@@ -142,11 +161,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
               onPressed: () => _bleController.startScanAndConnect(),
               icon: const Icon(Icons.search),
-              label: Text(_isConnected ? 'Re-Scan Bluetooth' : 'Connect to MatriSense'),
+              label: Text(
+                _isConnected ? 'Re-Scan Bluetooth' : 'Connect to MatriSense',
+              ),
             ),
             const SizedBox(height: 20),
 
-            // Vitals Grid
+            // Live Vitals Metric Display Grid
             GridView.count(
               crossAxisCount: 2,
               shrinkWrap: true,
@@ -154,10 +175,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
               crossAxisSpacing: 12,
               mainAxisSpacing: 12,
               children: [
-                _buildMetricCard("Heart Rate", "$_heartRate BPM", Icons.favorite, Colors.redAccent),
-                _buildMetricCard("SpO2", "$_spO2 %", Icons.water_drop, Colors.blueAccent),
-                _buildMetricCard("Skin Temp", "${_temperature.toStringAsFixed(2)} °C", Icons.thermostat, Colors.orangeAccent),
-                _buildMetricCard("Motion (X,Y,Z)", "${_accelX.toStringAsFixed(1)}, ${_accelY.toStringAsFixed(1)}, ${_accelZ.toStringAsFixed(1)}", Icons.vibration, Colors.purpleAccent),
+                _buildMetricCard(
+                  "Heart Rate",
+                  "$_heartRate BPM",
+                  Icons.favorite,
+                  Colors.redAccent,
+                ),
+                _buildMetricCard(
+                  "SpO2",
+                  "$_spO2 %",
+                  Icons.water_drop,
+                  Colors.blueAccent,
+                ),
+                _buildMetricCard(
+                  "Skin Temp",
+                  "${_temperature.toStringAsFixed(2)} °C",
+                  Icons.thermostat,
+                  Colors.orangeAccent,
+                ),
+                _buildMetricCard(
+                  "Motion (X,Y,Z)",
+                  "${_accelX.toStringAsFixed(1)}, ${_accelY.toStringAsFixed(1)}, ${_accelZ.toStringAsFixed(1)}",
+                  Icons.vibration,
+                  Colors.purpleAccent,
+                ),
               ],
             ),
           ],
@@ -166,7 +207,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _buildMetricCard(String title, String value, IconData icon, Color color) {
+  Widget _buildMetricCard(
+    String title,
+    String value,
+    IconData icon,
+    Color color,
+  ) {
     return Card(
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -177,9 +223,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
           children: [
             Icon(icon, size: 32, color: color),
             const SizedBox(height: 8),
-            Text(title, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            Text(
+              title,
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
             const SizedBox(height: 4),
-            Text(value, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            Text(
+              value,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ],
         ),
       ),
